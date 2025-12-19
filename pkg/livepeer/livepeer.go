@@ -173,8 +173,8 @@ func (ls *LivepeerSession) PostSegmentToGateway(ctx context.Context, buf []byte,
 	defer cancel()
 	seqNo := ls.Count
 
-	//# TODO: do a replace /live with live2 if ai processing is enabled
-	url := fmt.Sprintf("%s/live2/%s/%d.ts", ls.GatewayURL, sessionIDRen, seqNo)
+	//# TODO: do a replace /live with /process/transcode if ai processing is enabled
+	url := fmt.Sprintf("%s/process/transcode/%s/%d.ts", ls.GatewayURL, sessionIDRen, seqNo)
 	ls.Count++
 
 	dur := time.Duration(*spseg.Duration)
