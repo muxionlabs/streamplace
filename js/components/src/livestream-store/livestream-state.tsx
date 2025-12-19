@@ -6,6 +6,12 @@ import {
   PlaceStreamSegment,
 } from "streamplace";
 
+export interface AIDataOutput {
+  timestamp: string;
+  data: any;
+  text?: string;
+}
+
 export interface LivestreamState {
   profile: AppBskyActorDefs.ProfileViewBasic | null;
   chatIndex: { [key: string]: ChatMessageViewHydrated };
@@ -21,6 +27,7 @@ export interface LivestreamState {
   replyToMessage: ChatMessageViewHydrated | null;
   streamKey: string | null;
   setStreamKey: (key: string | null) => void;
+  aiOutputs: AIDataOutput[];
 }
 
 export interface LivestreamProblem {

@@ -1,5 +1,6 @@
 import { useNavigation } from "@react-navigation/native";
 import {
+  AIOutputDisplay,
   Button,
   layout,
   LivestreamProvider,
@@ -265,6 +266,7 @@ export function PlayerInner(
             )}
             <PlayerUI.ViewerLoadingOverlay />
             <OfflineCounter isMobile={true} />
+            <AIOutputDisplay />
             <View
               ref={dropdownPortalRef}
               style={{

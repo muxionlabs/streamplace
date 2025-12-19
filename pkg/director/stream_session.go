@@ -1,9 +1,14 @@
 package director
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -527,11 +532,19 @@ func (ss *StreamSession) Transcode(ctx context.Context, spseg *streamplace.Segme
 
 	}
 	spmetrics.TranscodeAttemptsTotal.Inc()
-	segs, err := ss.lp.PostSegmentToGateway(ctx, data, spseg, rs)
+	segs, streamUrls, err := ss.lp.PostSegmentToGateway(ctx, data, spseg, rs)
 	if err != nil {
 		spmetrics.TranscodeErrorsTotal.Inc()
 		return err
 	}
+
+	// If AI stream URLs are returned (first segment), start background worker to consume data output
+	if streamUrls != nil && streamUrls.DataURL != "" {
+		ss.Go(ctx, func() error {
+			return ss.ConsumeAIDataOutput(ctx, spseg.Creator, streamUrls.DataURL)
+		})
+	}
+
 	if len(rs) != len(segs) {
 		spmetrics.TranscodeErrorsTotal.Inc()
 		return fmt.Errorf("expected %d renditions, got %d", len(rs), len(segs))
@@ -581,6 +594,79 @@ func (ss *StreamSession) AddToWebRTC(ctx context.Context, spseg *streamplace.Seg
 	}
 	seg.PacketizedData = packet
 	ss.bus.PublishSegment(ctx, spseg.Creator, rendition, seg)
+	return nil
+}
+
+func (ss *StreamSession) ConsumeAIDataOutput(ctx context.Context, repoDID string, dataURL string) error {
+	ctx = log.WithLogValues(ctx, "func", "ConsumeAIDataOutput", "dataURL", dataURL)
+	log.Log(ctx, "starting AI data output consumer")
+
+	// Gateway returns https:// URLs but may actually serve HTTP on non-443 ports
+	// Rewrite https to http for non-standard ports
+	if strings.HasPrefix(dataURL, "https://") && strings.Contains(dataURL, ":") {
+		parts := strings.SplitN(dataURL[8:], "/", 2)
+		if len(parts) >= 1 && strings.Contains(parts[0], ":") {
+			port := strings.Split(parts[0], ":")[1]
+			if port != "443" {
+				dataURL = strings.Replace(dataURL, "https://", "http://", 1)
+				log.Log(ctx, "rewrote https to http for non-443 port", "dataURL", dataURL)
+			}
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", dataURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := aqhttp.DoTrusted(ctx, req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to data URL: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("data URL returned non-OK status: %d", resp.StatusCode)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	var eventData strings.Builder
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// SSE format: "data: {json}" or empty line to signal end of event
+		if strings.HasPrefix(line, "data: ") {
+			eventData.WriteString(strings.TrimPrefix(line, "data: "))
+		} else if line == "" && eventData.Len() > 0 {
+			// End of event, publish to bus
+			dataStr := eventData.String()
+			log.Log(ctx, "received ai data event", "data", dataStr)
+
+			// Try to parse as JSON and publish it
+			var msg map[string]any
+			if err := json.Unmarshal([]byte(dataStr), &msg); err == nil {
+				// Add a type identifier so the frontend can recognize it
+				msg["$type"] = "place.stream.ai#dataOutput"
+				ss.bus.Publish(repoDID, msg)
+			} else {
+				// If not JSON, publish as a plain text message
+				ss.bus.Publish(repoDID, map[string]any{
+					"$type": "place.stream.ai#dataOutput",
+					"text":  dataStr,
+				})
+			}
+
+			eventData.Reset()
+		}
+	}
+
+	if err := scanner.Err(); err != nil && err != io.EOF {
+		return fmt.Errorf("error reading data stream: %w", err)
+	}
+
+	log.Log(ctx, "AI data output consumer finished")
 	return nil
 }
 

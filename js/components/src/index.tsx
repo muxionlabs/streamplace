@@ -42,6 +42,9 @@ export * from "./utils/format-handle";
 export { DanmuOverlay } from "./components/danmu/danmu-overlay";
 export { DanmuOverlayOBS } from "./components/danmu/danmu-overlay-obs";
 
+// AI Output components
+export { AIOutputDisplay } from "./components/ai-output";
+
 // Rotation lock system exports
 export {
   RotationProvider,
