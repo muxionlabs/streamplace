@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"stream.place/streamplace/pkg/aqhttp"
@@ -38,11 +39,12 @@ type StreamUrls struct {
 }
 
 type LivepeerSession struct {
-	SessionID  string
-	Count      int
-	GatewayURL string
-	Guard      chan struct{}
-	CLI        *config.CLI
+	SessionID    string
+	Count        int
+	GatewayURL   string
+	Guard        chan struct{}
+	CLI          *config.CLI
+	aiURLsParsed atomic.Bool
 }
 
 // borrowed from catalyst-api
@@ -81,13 +83,6 @@ func (ls *LivepeerSession) sendSegmentRequest(ctx context.Context, req *http.Req
 // PostAISegmentToGateway sends the segment to the AI processing endpoint and returns stream URLs (from JSON body).
 func (ls *LivepeerSession) PostAISegmentToGateway(ctx context.Context, buf []byte, spseg *streamplace.Segment, rs renditions.Renditions) (*StreamUrls, error) {
 	ctx = log.WithLogValues(ctx, "func", "PostSegmentToGateway")
-	// Only first segment is expected to return AI stream URLs; skip subsequent ones.
-	seqNo := ls.Count
-	if seqNo > 0 {
-		log.Debug(ctx, "skipping AI post; AI stream URLs only expected on first segment", "seq", seqNo)
-		return nil, nil
-	}
-
 	lpProfiles := rs.ToLivepeerProfiles()
 	sessionIDRen := fmt.Sprintf("%s-%dren", ls.SessionID, len(rs))
 	transcodingConfiguration := map[string]any{
@@ -161,6 +156,18 @@ func (ls *LivepeerSession) PostAISegmentToGateway(ctx context.Context, buf []byt
 		return nil, fmt.Errorf("failed to marshal livepeer profile: %w", err)
 	}
 
+	// Convert MP4 to muxed MPEG-TS (aligns with transcode ingest format expected by /process/segment)
+	tsSeg := bytes.Buffer{}
+	audioSeg := bytes.Buffer{}
+	err = media.MP4ToMPEGTSVideoMP4Audio(ctx, bytes.NewReader(buf), &tsSeg, &audioSeg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert mp4 to ts for ai: %w", err)
+	}
+	if tsSeg.Len() == 0 {
+		return nil, fmt.Errorf("no video in segment for ai")
+	}
+	tsBytes := tsSeg.Bytes()
+
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -172,13 +179,13 @@ func (ls *LivepeerSession) PostAISegmentToGateway(ctx context.Context, buf []byt
 	dur := time.Duration(*spseg.Duration)
 	durationMs := int(dur.Milliseconds())
 
-	req_ai, err := http.NewRequestWithContext(ctx, "POST", url_ai, bytes.NewReader(buf))
+	req_ai, err := http.NewRequestWithContext(ctx, "POST", url_ai, bytes.NewReader(tsBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create AI request: %w", err)
 	}
 	req_ai.Header.Set("Accept", "multipart/mixed")
-	// Send original MP4 as-is; declare content type so gateway can parse (AAC expected, not Opus).
-	req_ai.Header.Set("Content-Type", "video/mp4")
+	// Send MPEG-TS to match transcode ingest path.
+	req_ai.Header.Set("Content-Type", "video/MP2T")
 	req_ai.Header.Set("Content-Duration", fmt.Sprintf("%d", durationMs))
 	req_ai.Header.Set("Content-Resolution", fmt.Sprintf("%dx%d", ingestWidth, ingestHeight))
 	req_ai.Header.Set("Livepeer-Transcode-Configuration", string(bs))
@@ -195,6 +202,12 @@ func (ls *LivepeerSession) PostAISegmentToGateway(ctx context.Context, buf []byt
 	}
 
 	// Parse AI response body for stream URLs (JSON, first segment)
+	parsedFirst := ls.aiURLsParsed.CompareAndSwap(false, true)
+	if !parsedFirst {
+		log.Debug(ctx, "skipping ai response parse; already parsed first segment")
+		return nil, nil
+	}
+
 	var streamUrls *StreamUrls
 	contentTypeAI := resp_ai.Header.Get("Content-Type")
 	log.Debug(ctx, "checking for AI stream URLs in /process/segment response body", "content_type_ai", contentTypeAI)
