@@ -107,22 +107,6 @@ func (ls *LivepeerSession) PostAISegmentToGateway(ctx context.Context, buf []byt
 		}
 		aiJobSettingsStr := string(aiJobSettingsJSON)
 
-		// // Read audio transcription API JSON file
-		// promptsJSONBytes, err := os.ReadFile("audio-transcription-api.json")
-		// if err != nil {
-		// 	return nil, fmt.Errorf("failed to read audio-transcription-api.json: %w", err)
-		// }
-		// var promptsContent map[string]any
-		// err = json.Unmarshal(promptsJSONBytes, &promptsContent)
-		// if err != nil {
-		// 	return nil, fmt.Errorf("failed to parse audio-transcription-api.json: %w", err)
-		// // }
-
-		// promptsJSONString, err := json.MarshalIndent(promptsContent, "", "  ")
-		// if err != nil {
-		// 	return nil, fmt.Errorf("failed to marshal prompts: %w", err)
-		// }
-
 		aiJobParams := map[string]any{
 			"height": ingestHeight,
 			// "prompts": string(promptsJSONString),
