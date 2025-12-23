@@ -532,17 +532,50 @@ func (ss *StreamSession) Transcode(ctx context.Context, spseg *streamplace.Segme
 
 	}
 	spmetrics.TranscodeAttemptsTotal.Inc()
-	segs, streamUrls, err := ss.lp.PostSegmentToGateway(ctx, data, spseg, rs)
-	if err != nil {
+	var (
+		segs       [][]byte
+		streamUrls *livepeer.StreamUrls
+	)
+
+	if ss.cli.LivepeerAIProcessing {
+		go func() {
+			urls, err := ss.lp.PostAISegmentToGateway(ctx, data, spseg, rs)
+			if err != nil {
+				log.Error(ctx, "ai segment post failed", "error", err)
+				return
+			}
+			if urls != nil {
+				streamUrls = urls
+			}
+		}()
+	}
+
+	// Transcode segment (critical path)
+	group, gctx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		out, err := ss.lp.PostSegmentToGateway(gctx, data, spseg, rs)
+		if err != nil {
+			return err
+		}
+		segs = out
+		return nil
+	})
+
+	if err := group.Wait(); err != nil {
 		spmetrics.TranscodeErrorsTotal.Inc()
 		return err
 	}
 
 	// If AI stream URLs are returned (first segment), start background worker to consume data output
 	if streamUrls != nil && streamUrls.DataURL != "" {
+		log.Log(ctx, "✓ STARTING AI DATA OUTPUT CONSUMER", "data_url", streamUrls.DataURL, "stream_id", streamUrls.StreamID)
 		ss.Go(ctx, func() error {
 			return ss.ConsumeAIDataOutput(ctx, spseg.Creator, streamUrls.DataURL)
 		})
+	} else if streamUrls == nil {
+		log.Debug(ctx, "no streamUrls returned from PostSegmentToGateway")
+	} else if streamUrls.DataURL == "" {
+		log.Log(ctx, "streamUrls returned but no data_url", "stream_id", streamUrls.StreamID)
 	}
 
 	if len(rs) != len(segs) {
