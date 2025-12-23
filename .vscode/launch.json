@@ -3,22 +3,30 @@
   "configurations": [
     {
       "name": "Run Streamplace (linux)",
-      "type": "node",
+      "type": "go",
       "request": "launch",
-      "runtimeExecutable": "bash",
-      "runtimeArgs": [
-        "-c",
-        "./build-linux-amd64/streamplace --broadcaster-host=127.0.0.1:38080 --no-firehose --wide-open --livepeer-ai-processing --livepeer-ai-capability=comfystream --livepeer-ai-enable-data-output --livepeer-gateway-url=http://10.10.7.61:8081"
+      "mode": "exec",
+      "program": "${workspaceFolder}/build-linux-amd64/libstreamplace",
+      "args": [
+        "--broadcaster-host=127.0.0.1:38080",
+        "--no-firehose",
+        "--wide-open",
+        "--livepeer-debug",
+        "--livepeer-gateway-url=http://10.10.7.61:8081",
+        "--livepeer-ai-processing",
+        "--livepeer-ai-capability=comfystream",
+        "--livepeer-ai-enable-data-output"
       ],
       "cwd": "${workspaceFolder}",
       "env": {
         "GOTOOLCHAIN": "auto",
         "LD_LIBRARY_PATH": "${workspaceFolder}/build-linux-amd64/lib",
-        "ELECTRON_DISABLE_SANDBOX": "1"
+        "ELECTRON_DISABLE_SANDBOX": "1",
+        "SP_DEV_FRONTEND_PROXY": "http://127.0.0.1:38081",
+        "SP_DEV_PUBLIC_OAUTH": "true"
       },
-
       "console": "integratedTerminal"
-    },
+    }, //https://gateway-usa.muxion.video/g
     {
       "name": "Run Streamplace App Dev Server",
       "type": "node",
@@ -38,7 +46,7 @@
       "runtimeExecutable": "bash",
       "runtimeArgs": [
         "-c",
-        "./build-darwin-arm64/streamplace --broadcaster-host=127.0.0.1:38080 --livepeer-gateway-url=http://localhost:8081"
+        "./build-darwin-arm64/streamplace --broadcaster-host=127.0.0.1:38080 --livepeer-gateway-url=https://10.10.7.61:8081"
       ],
       "cwd": "${workspaceFolder}",
       "args": ["--no-firehose", "--wide-open"],
