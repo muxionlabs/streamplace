@@ -166,7 +166,6 @@ func (ls *LivepeerSession) PostAISegmentToGateway(ctx context.Context, buf []byt
 	if tsSeg.Len() == 0 {
 		return nil, fmt.Errorf("no video in segment for ai")
 	}
-	tsBytes := tsSeg.Bytes()
 
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -179,7 +178,7 @@ func (ls *LivepeerSession) PostAISegmentToGateway(ctx context.Context, buf []byt
 	dur := time.Duration(*spseg.Duration)
 	durationMs := int(dur.Milliseconds())
 
-	req_ai, err := http.NewRequestWithContext(ctx, "POST", url_ai, bytes.NewReader(tsBytes))
+	req_ai, err := http.NewRequestWithContext(ctx, "POST", url_ai, bytes.NewReader(buf))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create AI request: %w", err)
 	}
