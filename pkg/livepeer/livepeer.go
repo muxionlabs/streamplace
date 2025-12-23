@@ -70,6 +70,26 @@ func NewLivepeerSession(ctx context.Context, cli *config.CLI, did string, gatewa
 	}, nil
 }
 
+func (ls *LivepeerSession) sendSegmentRequest(ctx context.Context, req *http.Request) (*http.Response, error) {
+
+	// log.Debug(ctx, "posting segment to livepeer gateway", "duration_ms", "url", url)
+
+	resp, err := aqhttp.DoTrusted(ctx, req)
+	if err != nil {
+		<-ls.Guard
+		return nil, fmt.Errorf("failed to send segment to gateway (config): %w", err)
+	}
+	<-ls.Guard
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errOut, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gateway returned non-OK status (config): %d, %s", resp.StatusCode, string(errOut))
+	}
+
+	return resp, nil
+}
+
 func (ls *LivepeerSession) PostSegmentToGateway(ctx context.Context, buf []byte, spseg *streamplace.Segment, rs renditions.Renditions) ([][]byte, *StreamUrls, error) {
 	ctx = log.WithLogValues(ctx, "func", "PostSegmentToGateway")
 	lpProfiles := rs.ToLivepeerProfiles()
@@ -102,6 +122,8 @@ func (ls *LivepeerSession) PostSegmentToGateway(ctx context.Context, buf []byte,
 		aiJobSettingsStr := string(aiJobSettingsJSON)
 
 		// Read audio transcription API JSON file
+		// promptsJSONBytes, err := os.ReadFile("example-workflow.json")
+
 		promptsJSONBytes, err := os.ReadFile("audio-transcription-api.json")
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read audio-transcription-api.json: %w", err)
@@ -122,6 +144,14 @@ func (ls *LivepeerSession) PostSegmentToGateway(ctx context.Context, buf []byte,
 			"prompts": string(promptsJSONString),
 			"width":   width,
 		}
+
+		// aiJobParams := map[string]any{
+		// 	"modality":           "audio",
+		// 	"correction_enabled": false,
+		// 	"audio_window_s":     2.0,
+		// 	"height":             height,
+		// 	"width":              width,
+		// }
 
 		aiJobParamsStr, err := json.Marshal(aiJobParams)
 		if err != nil {
@@ -150,6 +180,8 @@ func (ls *LivepeerSession) PostSegmentToGateway(ctx context.Context, buf []byte,
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to marshal livepeer profile: %w", err)
 	}
+	// Convert MP4 to muxed MPEG-TS
+
 	tsSeg := bytes.Buffer{}
 	audioSeg := bytes.Buffer{}
 	err = media.MP4ToMPEGTSVideoMP4Audio(ctx, bytes.NewReader(buf), &tsSeg, &audioSeg)
@@ -162,6 +194,7 @@ func (ls *LivepeerSession) PostSegmentToGateway(ctx context.Context, buf []byte,
 	if audioSeg.Len() == 0 {
 		return nil, nil, fmt.Errorf("no audio in segment")
 	}
+
 	ls.Guard <- struct{}{}
 	start := time.Now()
 	// check if context is done since we were waiting for the lock
@@ -174,14 +207,15 @@ func (ls *LivepeerSession) PostSegmentToGateway(ctx context.Context, buf []byte,
 	seqNo := ls.Count
 
 	//# TODO: do a replace /live with /process/transcode if ai processing is enabled
-	url := fmt.Sprintf("%s/process/transcode/%s/%d.ts", ls.GatewayURL, sessionIDRen, seqNo)
+	url_transcode := fmt.Sprintf("%s/process/transcode/%s/%d.ts", ls.GatewayURL, sessionIDRen, seqNo)
+	url_ai := fmt.Sprintf("%s/process/segment/%s/%d.ts", ls.GatewayURL, sessionIDRen, seqNo)
+
 	ls.Count++
 
 	dur := time.Duration(*spseg.Duration)
 	durationMs := int(dur.Milliseconds())
-	log.Debug(ctx, "posting segment to livepeer gateway", "duration_ms", durationMs, "url", url)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(tsSeg.Bytes()))
+	req, err := http.NewRequestWithContext(ctx, "POST", url_transcode, bytes.NewReader(tsSeg.Bytes()))
 	if err != nil {
 		<-ls.Guard
 		return nil, nil, fmt.Errorf("failed to create request: %w", err)
@@ -214,13 +248,39 @@ func (ls *LivepeerSession) PostSegmentToGateway(ctx context.Context, buf []byte,
 		log.Log(ctx, "wrote debug file", "file", debugFile)
 	}
 
-	resp, err := aqhttp.DoTrusted(ctx, req)
+	resp, err := ls.sendSegmentRequest(ctx, req)
 	if err != nil {
 		<-ls.Guard
-		return nil, nil, fmt.Errorf("failed to send segment to gateway (config %s): %w", string(bs), err)
+		return nil, nil, err
 	}
 	<-ls.Guard
 	defer resp.Body.Close()
+
+	req_ai, err := http.NewRequestWithContext(ctx, "POST", url_ai, bytes.NewReader(buf))
+	if err != nil {
+		<-ls.Guard
+		return nil, nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req_ai.Header.Set("Accept", "multipart/mixed")
+	req_ai.Header.Set("Content-Duration", fmt.Sprintf("%d", durationMs))
+	req_ai.Header.Set("Content-Resolution", fmt.Sprintf("%dx%d", ingestWidth, ingestHeight))
+	req_ai.Header.Set("Livepeer-Transcode-Configuration", string(bs))
+
+	resp_ai, err := ls.sendSegmentRequest(ctx, req_ai)
+	if err != nil {
+		<-ls.Guard
+		return nil, nil, err
+	}
+	<-ls.Guard
+	defer resp_ai.Body.Close()
+
+	// resp, err := aqhttp.DoTrusted(ctx, req)
+	// if err != nil {
+	// 	<-ls.Guard
+	// 	return nil, nil, fmt.Errorf("failed to send segment to gateway (config %s): %w", string(bs), err)
+	// }
+	// <-ls.Guard
+	// defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		errOut, _ := io.ReadAll(resp.Body)
@@ -275,7 +335,6 @@ func (ls *LivepeerSession) PostSegmentToGateway(ctx context.Context, buf []byte,
 			}
 
 			mp4Bs := bytes.Buffer{}
-			audioReader := bytes.NewReader(audioSeg.Bytes())
 			if ls.CLI.LivepeerDebug {
 				debugFile := fmt.Sprintf("%s/livepeer-debug/%s-%06d-output-%s", ls.CLI.DataDir, sessionIDRen, seqNo, p.FileName())
 				err = os.WriteFile(debugFile, tsSeg.Bytes(), 0644)
@@ -284,7 +343,7 @@ func (ls *LivepeerSession) PostSegmentToGateway(ctx context.Context, buf []byte,
 				}
 				log.Log(ctx, "wrote debug file", "file", debugFile)
 			}
-			err = media.MPEGTSVideoMP4AudioToMP4(ctx, p, audioReader, &mp4Bs)
+			err = media.MPEGTSToMP4(ctx, p, &mp4Bs)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to convert ts to mp4: %w", err)
 			}
