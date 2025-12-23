@@ -532,22 +532,28 @@ func (ss *StreamSession) Transcode(ctx context.Context, spseg *streamplace.Segme
 
 	}
 	spmetrics.TranscodeAttemptsTotal.Inc()
-	var (
-		segs       [][]byte
-		streamUrls *livepeer.StreamUrls
-	)
+	var segs [][]byte
 
+	// Kick off AI processing concurrently; start the data consumer when URLs arrive.
 	if ss.cli.LivepeerAIProcessing {
-		go func() {
+		ss.Go(ctx, func() error {
 			urls, err := ss.lp.PostAISegmentToGateway(ctx, data, spseg, rs)
 			if err != nil {
 				log.Error(ctx, "ai segment post failed", "error", err)
-				return
+				return nil
 			}
-			if urls != nil {
-				streamUrls = urls
+			if urls != nil && urls.DataURL != "" {
+				log.Log(ctx, "✓ STARTING AI DATA OUTPUT CONSUMER", "data_url", urls.DataURL, "stream_id", urls.StreamID)
+				ss.Go(ctx, func() error {
+					return ss.ConsumeAIDataOutput(ctx, spseg.Creator, urls.DataURL)
+				})
+			} else if urls == nil {
+				log.Debug(ctx, "no streamUrls returned from PostAISegmentToGateway")
+			} else {
+				log.Log(ctx, "streamUrls returned but no data_url", "stream_id", urls.StreamID)
 			}
-		}()
+			return nil
+		})
 	}
 
 	// Transcode segment (critical path)
@@ -564,18 +570,6 @@ func (ss *StreamSession) Transcode(ctx context.Context, spseg *streamplace.Segme
 	if err := group.Wait(); err != nil {
 		spmetrics.TranscodeErrorsTotal.Inc()
 		return err
-	}
-
-	// If AI stream URLs are returned (first segment), start background worker to consume data output
-	if streamUrls != nil && streamUrls.DataURL != "" {
-		log.Log(ctx, "✓ STARTING AI DATA OUTPUT CONSUMER", "data_url", streamUrls.DataURL, "stream_id", streamUrls.StreamID)
-		ss.Go(ctx, func() error {
-			return ss.ConsumeAIDataOutput(ctx, spseg.Creator, streamUrls.DataURL)
-		})
-	} else if streamUrls == nil {
-		log.Debug(ctx, "no streamUrls returned from PostSegmentToGateway")
-	} else if streamUrls.DataURL == "" {
-		log.Log(ctx, "streamUrls returned but no data_url", "stream_id", streamUrls.StreamID)
 	}
 
 	if len(rs) != len(segs) {
