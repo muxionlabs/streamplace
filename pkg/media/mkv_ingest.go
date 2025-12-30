@@ -124,7 +124,6 @@ func (mm *MediaManager) startAIGatewayTee(ctx context.Context, input io.Reader, 
 	cfg := aigateway.Config{
 		BaseURL:       mm.cli.AIGatewayBaseURL,
 		PathPrefix:    mm.cli.AIGatewayPathPrefix,
-		RewriteURLsTo: mm.cli.AIGatewayRewriteURLsTo,
 		Pipeline:      mm.cli.AIGatewayPipeline,
 		RTMPHost:      mm.cli.AIGatewayRTMPHost,
 	}
@@ -153,7 +152,11 @@ func (mm *MediaManager) startAIGatewayTee(ctx context.Context, input io.Reader, 
 	}
 	if rtmpURL == "" {
 		log.Error(ctx, "AI gateway did not provide rtmp_url and no --ai-gateway-rtmp-host set, continuing without transcription", "streamID", session.ID)
-		_ = aigateway.StopStream(context.Background(), cfg, session.ID)
+		if session.StopURL != "" {
+			_ = aigateway.StopStreamURL(context.Background(), session.StopURL)
+		} else {
+			_ = aigateway.StopStream(context.Background(), cfg, session.ID)
+		}
 		return input, func() {}
 	}
 	publisher := aigateway.NewRTMPPublisher(ctx, mm.cli.AIGatewayFFmpegBin, rtmpURL)
@@ -161,7 +164,11 @@ func (mm *MediaManager) startAIGatewayTee(ctx context.Context, input io.Reader, 
 	stdin, err := publisher.Start()
 	if err != nil {
 		log.Error(ctx, "failed to start RTMP publisher, continuing without transcription", "error", err)
-		_ = aigateway.StopStream(context.Background(), cfg, session.ID)
+		if session.StopURL != "" {
+			_ = aigateway.StopStreamURL(context.Background(), session.StopURL)
+		} else {
+			_ = aigateway.StopStream(context.Background(), cfg, session.ID)
+		}
 		return input, func() {}
 	}
 
@@ -170,7 +177,7 @@ func (mm *MediaManager) startAIGatewayTee(ctx context.Context, input io.Reader, 
 
 	mm.startSSEReader(ctx, session.DataURL, streamer)
 
-	cleanup := mm.makeAIGatewayCleanup(ctx, cfg, session.ID, streamer, asyncWriter, publisher.Stop)
+	cleanup := mm.makeAIGatewayCleanup(ctx, cfg, session.ID, session.StopURL, streamer, asyncWriter, publisher.Stop)
 
 	return teedInput, cleanup
 }
@@ -186,7 +193,11 @@ func (mm *MediaManager) startAIGatewayWHIP(ctx context.Context, input io.Reader,
 	if err := publisher.Start(); err != nil {
 		log.Error(ctx, "failed to start WHIP publisher, continuing without transcription", "error", err)
 		_ = asyncWriter.Close()
-		_ = aigateway.StopStream(context.Background(), cfg, session.ID)
+		if session.StopURL != "" {
+			_ = aigateway.StopStreamURL(context.Background(), session.StopURL)
+		} else {
+			_ = aigateway.StopStream(context.Background(), cfg, session.ID)
+		}
 		return input, func() {}
 	}
 
@@ -198,6 +209,11 @@ func (mm *MediaManager) startAIGatewayWHIP(ctx context.Context, input io.Reader,
 		data []byte
 		dur  time.Duration
 	}, 64)
+
+	var audioWindowSeq int64
+	const audioWindowDur = 3 * time.Second
+	var curWindowAccum time.Duration
+	var curWindowStarted bool
 
 	go func() {
 		for {
@@ -298,6 +314,36 @@ func (mm *MediaManager) startAIGatewayWHIP(ctx context.Context, input io.Reader,
 			if buf == nil {
 				return gst.FlowError
 			}
+			pts := buf.PresentationTimestamp()
+			if pts != gst.ClockTimeNone {
+				if !curWindowStarted {
+					curWindowStarted = true
+					curWindowAccum = 0
+					audioWindowSeq++
+					// Use wall-clock time for audio anchors.
+					// This WHIP pipeline has a different base time than the main HLS pipeline,
+					// so GStreamer running-time values are not comparable. Wall-clock time
+					// is the only common reference across both pipelines.
+					wallClockMS := time.Now().UnixMilli()
+					anchor := aigateway.AudioWindowAnchorUpdate{
+						Type:                "audio_window_anchor",
+						AudioWindowSeq:      audioWindowSeq,
+						MediaWindowStartMS:  wallClockMS,
+						MediaWindowDurMS:    int64(audioWindowDur / time.Millisecond),
+						MediaClockTimebase:  "wall_clock_ms",
+						StreamplaceStreamID: session.ID,
+					}
+					mm.setAudioWindowAnchor(streamer, anchor)
+					go func(a aigateway.AudioWindowAnchorUpdate) {
+						if session.UpdateURL == "" {
+							return
+						}
+						if err := aigateway.SendStreamUpdate(ctx, session.UpdateURL, session.ID, cfg.Pipeline, a); err != nil {
+							log.Warn(ctx, "failed to send audio window anchor update", "error", err)
+						}
+					}(anchor)
+				}
+			}
 			b := buf.Map(gst.MapRead).Bytes()
 			cpy := make([]byte, len(b))
 			copy(cpy, b)
@@ -306,6 +352,14 @@ func (mm *MediaManager) startAIGatewayWHIP(ctx context.Context, input io.Reader,
 			dur := time.Duration(0)
 			if durPtr != nil {
 				dur = *durPtr
+			}
+			if curWindowStarted {
+				curWindowAccum += dur
+				if curWindowAccum >= audioWindowDur {
+					// Start a new window on the next buffer with a valid PTS.
+					curWindowStarted = false
+					curWindowAccum = 0
+				}
 			}
 			select {
 			case audioCh <- struct {
@@ -343,7 +397,7 @@ func (mm *MediaManager) startAIGatewayWHIP(ctx context.Context, input io.Reader,
 
 	mm.startSSEReader(ctx, session.DataURL, streamer)
 
-	cleanup := mm.makeAIGatewayCleanup(ctx, cfg, session.ID, streamer, asyncWriter, publisher.Stop)
+	cleanup := mm.makeAIGatewayCleanup(ctx, cfg, session.ID, session.StopURL, streamer, asyncWriter, publisher.Stop)
 
 	return teedInput, cleanup
 }
@@ -358,9 +412,9 @@ func (mm *MediaManager) startSSEReader(ctx context.Context, dataURL string, stre
 		err := aigateway.ReadSSE(ctx, dataURL, func(ctx context.Context, event aigateway.TranscriptEvent) {
 			log.Debug(ctx, "received transcript event",
 				"type", event.Type,
-				"text", event.Text,
-				"timestamp_ms", event.TimestampMS,
+				"segments", len(event.Segments),
 			)
+			mm.rebaseTranscriptEvent(streamer, &event)
 			mm.transcriptStore.AddEvent(streamer, event)
 		})
 		if err != nil && ctx.Err() == nil {
@@ -374,6 +428,7 @@ func (mm *MediaManager) makeAIGatewayCleanup(
 	ctx context.Context,
 	cfg aigateway.Config,
 	sessionID string,
+	stopURL string,
 	streamer string,
 	asyncWriter *aigateway.AsyncWriter,
 	stopPublisher func(),
@@ -387,7 +442,13 @@ func (mm *MediaManager) makeAIGatewayCleanup(
 
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := aigateway.StopStream(stopCtx, cfg, sessionID); err != nil {
+		var err error
+		if stopURL != "" {
+			err = aigateway.StopStreamURL(stopCtx, stopURL)
+		} else {
+			err = aigateway.StopStream(stopCtx, cfg, sessionID)
+		}
+		if err != nil {
 			log.Error(ctx, "failed to stop AI gateway session", "error", err)
 		} else {
 			log.Log(ctx, "AI gateway session stopped", "streamID", sessionID)
