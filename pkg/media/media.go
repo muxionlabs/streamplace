@@ -15,8 +15,8 @@ import (
 	"github.com/pion/interceptor/pkg/intervalpli"
 	"github.com/pion/webrtc/v4"
 	"go.opentelemetry.io/otel"
-	"stream.place/streamplace/pkg/aqtime"
 	"stream.place/streamplace/pkg/aigateway"
+	"stream.place/streamplace/pkg/aqtime"
 	"stream.place/streamplace/pkg/atproto"
 	"stream.place/streamplace/pkg/bus"
 	c2patypes "stream.place/streamplace/pkg/c2patypes"
@@ -53,6 +53,8 @@ type MediaManager struct {
 	webrtcAPI           *webrtc.API
 	webrtcConfig        webrtc.Configuration
 	transcriptStore     *aigateway.TranscriptStore
+	audioWindowAnchors  map[string]map[int64]aigateway.AudioWindowAnchorUpdate
+	audioAnchorsMu      sync.RWMutex
 }
 
 type NewSegmentNotification struct {
@@ -130,11 +132,119 @@ func MakeMediaManager(ctx context.Context, cli *config.CLI, signer crypto.Signer
 		webrtcAPI:       api,
 		webrtcConfig:    config,
 		transcriptStore: aigateway.NewTranscriptStore(),
+		audioWindowAnchors: map[string]map[int64]aigateway.AudioWindowAnchorUpdate{},
 	}, nil
 }
 
 func (mm *MediaManager) GetTranscriptSegments(streamer string) []aigateway.TranscriptSegment {
 	return mm.transcriptStore.GetSegments(streamer)
+}
+
+func (mm *MediaManager) setAudioWindowAnchor(streamer string, anchor aigateway.AudioWindowAnchorUpdate) {
+	ctx := context.Background()
+	if streamer == "" || anchor.AudioWindowSeq <= 0 || anchor.MediaWindowStartMS < 0 {
+		log.Debug(ctx, "setAudioWindowAnchor: skipping invalid anchor",
+			"streamer", streamer,
+			"seq", anchor.AudioWindowSeq,
+			"start_ms", anchor.MediaWindowStartMS,
+		)
+		return
+	}
+	mm.audioAnchorsMu.Lock()
+	defer mm.audioAnchorsMu.Unlock()
+	if _, ok := mm.audioWindowAnchors[streamer]; !ok {
+		mm.audioWindowAnchors[streamer] = map[int64]aigateway.AudioWindowAnchorUpdate{}
+	}
+	mm.audioWindowAnchors[streamer][anchor.AudioWindowSeq] = anchor
+
+	// Retain a bounded number of anchors per streamer.
+	if len(mm.audioWindowAnchors[streamer]) > 2048 {
+		cutoff := anchor.AudioWindowSeq - 2048
+		for seq := range mm.audioWindowAnchors[streamer] {
+			if seq <= cutoff {
+				delete(mm.audioWindowAnchors[streamer], seq)
+			}
+		}
+	}
+}
+
+func (mm *MediaManager) getAudioWindowAnchor(streamer string, seq int64) (aigateway.AudioWindowAnchorUpdate, bool) {
+	mm.audioAnchorsMu.RLock()
+	defer mm.audioAnchorsMu.RUnlock()
+	m, ok := mm.audioWindowAnchors[streamer]
+	if !ok {
+		return aigateway.AudioWindowAnchorUpdate{}, false
+	}
+	a, ok := m[seq]
+	return a, ok
+}
+
+func (mm *MediaManager) rebaseTranscriptEvent(streamer string, event *aigateway.TranscriptEvent) {
+	if event == nil || event.Timing == nil {
+		return
+	}
+	if event.Timing.AudioWindowSeq <= 0 {
+		return
+	}
+	// If the producer explicitly declares the timebase as audio-window relative, rebase.
+	// Otherwise, allow a best-effort rebase when the producer provides an audio_window_seq
+	// and the segment timestamps look relative (small values).
+	relative := event.Timing.Timebase == "audio_window_ms"
+	if !relative {
+		minStart := int64(1 << 62)
+		maxEnd := int64(0)
+		for i := range event.Segments {
+			seg := event.Segments[i]
+			if seg.StartMS < minStart {
+				minStart = seg.StartMS
+			}
+			if seg.EndMS > maxEnd {
+				maxEnd = seg.EndMS
+			}
+		}
+		// Heuristic: if all times are within a single short window, treat as relative.
+		// Default window is 3s, but allow some slack.
+		if len(event.Segments) > 0 && minStart >= 0 && maxEnd > 0 && maxEnd <= 10_000 {
+			relative = true
+		}
+	}
+	if !relative {
+		return
+	}
+	anchor, anchorOK := mm.getAudioWindowAnchor(streamer, event.Timing.AudioWindowSeq)
+	base := int64(-1)
+	if anchorOK {
+		base = anchor.MediaWindowStartMS
+	} else if event.Timing.MediaWindowStartMS > 0 && (event.Timing.Timebase == "audio_window_ms" || event.Timing.MediaWindowStartMS > 10_000) {
+		base = event.Timing.MediaWindowStartMS
+	} else {
+		return
+	}
+	if base < 0 {
+		return
+	}
+
+	shiftSeg := func(seg *aigateway.TranscriptSegment) {
+		seg.StartMS += base
+		seg.EndMS += base
+		for i := range seg.Words {
+			seg.Words[i].StartMS += base
+			seg.Words[i].EndMS += base
+		}
+	}
+	for i := range event.Segments {
+		shiftSeg(&event.Segments[i])
+	}
+
+	event.Timing.MediaWindowStartMS = base
+	if anchorOK && anchor.MediaWindowDurMS > 0 {
+		event.Timing.MediaWindowEndMS = base + anchor.MediaWindowDurMS
+	}
+	if anchorOK && anchor.MediaClockTimebase != "" {
+		event.Timing.Timebase = anchor.MediaClockTimebase
+	} else {
+		event.Timing.Timebase = "streamplace_running_time_ms"
+	}
 }
 
 func (mm *MediaManager) HandleData(node *irohStreamplace.PublicKey, data []byte) {

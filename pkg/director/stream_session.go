@@ -614,11 +614,12 @@ func (ss *StreamSession) AddToHLS(ctx context.Context, spseg *streamplace.Segmen
 	if err != nil {
 		return fmt.Errorf("failed to get rendition: %w", err)
 	}
-	if err := rend.NewSegment(&media.Segment{
+	seg := &media.Segment{
 		Buf:      &buf,
 		Duration: time.Duration(dur),
 		Time:     aqt.Time(),
-	}); err != nil {
+	}
+	if err := rend.NewSegment(seg); err != nil {
 		return fmt.Errorf("failed to create new segment: %w", err)
 	}
 

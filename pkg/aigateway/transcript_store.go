@@ -6,15 +6,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 )
 
 const (
 	// MaxTranscriptEvents is the maximum number of events to retain per streamer.
-	MaxTranscriptEvents = 1000
-
-	// TranscriptRetention is how long to retain transcript events before cleanup.
-	TranscriptRetention = 5 * time.Minute
+	MaxTranscriptEvents = 500
 )
 
 // TranscriptStore provides thread-safe storage for transcript segments (timed cues)
@@ -43,27 +39,8 @@ func stableSegmentID(seg TranscriptSegment) string {
 	return fmt.Sprintf("%d-%d-%08x", seg.StartMS, seg.EndMS, h.Sum32())
 }
 
-func eventToLegacySegment(e TranscriptEvent) (TranscriptSegment, bool) {
-	text := e.Text
-	if strings.TrimSpace(text) == "" {
-		return TranscriptSegment{}, false
-	}
-	// Legacy fallback: anchor the segment around an inferred event time.
-	t := eventTimeMS(e)
-	start := t
-	end := t + defaultLastCueDurationMS
-	if e.Stats != nil && e.Stats.AudioDurationMS > 0 {
-		// Approximate segment as spanning the recognition window duration.
-		end = start + int64(e.Stats.AudioDurationMS)
-	}
-	seg := TranscriptSegment{StartMS: start, EndMS: end, Text: text}
-	seg.ID = stableSegmentID(seg)
-	return seg, true
-}
-
 // AddEvent ingests a transcript event for the given streamer.
-// If the event contains structured Segments, they are added as timed cues.
-// Otherwise, a legacy Text-only event is converted into a best-effort segment.
+// Structured Segments are added as timed cues.
 // If the segment count exceeds MaxTranscriptEvents, older segments are discarded.
 func (ts *TranscriptStore) AddEvent(streamer string, event TranscriptEvent) {
 	ts.mu.Lock()
@@ -130,17 +107,10 @@ func (ts *TranscriptStore) AddEvent(streamer string, event TranscriptEvent) {
 		}
 	}
 
-	if len(event.Segments) > 0 {
-		for _, seg := range event.Segments {
-			if strings.TrimSpace(seg.Text) == "" {
-				continue
-			}
-			addSeg(seg)
+	for _, seg := range event.Segments {
+		if strings.TrimSpace(seg.Text) == "" {
+			continue
 		}
-		return
-	}
-
-	if seg, ok := eventToLegacySegment(event); ok {
 		addSeg(seg)
 	}
 }
@@ -173,24 +143,4 @@ func (ts *TranscriptStore) Clear(streamer string) {
 	defer ts.mu.Unlock()
 	delete(ts.segs, streamer)
 	delete(ts.seen, streamer)
-}
-
-// Cleanup removes events older than TranscriptRetention and removes
-// streamers with no remaining events. Should be called periodically.
-func (ts *TranscriptStore) Cleanup() {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	_ = time.Now().Add(-TranscriptRetention)
-	for streamer, segs := range ts.segs {
-		var kept []TranscriptSegment
-		// We don't currently carry ReceivedAt on segments, so use stream-relative time
-		// retention only as a bounded list via MaxTranscriptEvents.
-		kept = append(kept, segs...)
-		if len(kept) == 0 {
-			delete(ts.segs, streamer)
-			delete(ts.seen, streamer)
-		} else {
-			ts.segs[streamer] = kept
-		}
-	}
 }
