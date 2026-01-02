@@ -138,6 +138,10 @@ type CLI struct {
 	BehindHTTPSProxy            bool
 	SegmentDebugDir             string
 	Syndicate                   []string
+	AIGatewayBaseURL           string
+	AIGatewayPipeline          string
+	AIGatewayRTMPHost          string
+	AIGatewayFFmpegBin         string
 }
 
 // ContentFilters represents the content filtering configuration
@@ -236,6 +240,11 @@ func (cli *CLI) NewFlagSet(name string) *flag.FlagSet {
 	fs.StringVar(&cli.WebsocketURL, "websocket-url", "", "override the websocket (ws:// or wss://) url to use for replication (normally not necessary, used for testing)")
 	fs.BoolVar(&cli.BehindHTTPSProxy, "behind-https-proxy", false, "set to true if this node is behind an https proxy and we should report https URLs even though the node isn't serving HTTPS")
 	cli.StringSliceFlag(fs, &cli.Syndicate, "syndicate", []string{}, "list of DIDs that we should rebroadcast ('*' for everybody)")
+
+	fs.StringVar(&cli.AIGatewayBaseURL, "ai-gateway-base-url", "", "base URL of the AI transcription gateway (e.g. http://localhost:5937)")
+	fs.StringVar(&cli.AIGatewayPipeline, "ai-gateway-pipeline", "transcription", "AI pipeline capability name")
+	fs.StringVar(&cli.AIGatewayRTMPHost, "ai-gateway-rtmp-host", "localhost:1937", "RTMP host:port for AI gateway media ingress")
+	fs.StringVar(&cli.AIGatewayFFmpegBin, "ai-gateway-ffmpeg-bin", "ffmpeg", "path to ffmpeg binary for AI gateway publisher")
 
 	fs.Bool("external-signing", true, "DEPRECATED, does nothing.")
 	fs.Bool("insecure", false, "DEPRECATED, does nothing.")

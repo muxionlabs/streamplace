@@ -16,6 +16,7 @@ import (
 	"github.com/pion/webrtc/v4"
 	"go.opentelemetry.io/otel"
 	"stream.place/streamplace/pkg/aqtime"
+	"stream.place/streamplace/pkg/aigateway"
 	"stream.place/streamplace/pkg/atproto"
 	"stream.place/streamplace/pkg/bus"
 	c2patypes "stream.place/streamplace/pkg/c2patypes"
@@ -51,6 +52,7 @@ type MediaManager struct {
 	atsync              *atproto.ATProtoSynchronizer
 	webrtcAPI           *webrtc.API
 	webrtcConfig        webrtc.Configuration
+	transcriptStore     *aigateway.TranscriptStore
 }
 
 type NewSegmentNotification struct {
@@ -119,15 +121,20 @@ func MakeMediaManager(ctx context.Context, cli *config.CLI, signer crypto.Signer
 		},
 	}
 	return &MediaManager{
-		cli:          cli,
-		hlsRunning:   map[string]*M3U8{},
-		httpPipes:    map[string]io.Writer{},
-		model:        mod,
-		bus:          bus,
-		atsync:       atsync,
-		webrtcAPI:    api,
-		webrtcConfig: config,
+		cli:             cli,
+		hlsRunning:      map[string]*M3U8{},
+		httpPipes:       map[string]io.Writer{},
+		model:           mod,
+		bus:             bus,
+		atsync:          atsync,
+		webrtcAPI:       api,
+		webrtcConfig:    config,
+		transcriptStore: aigateway.NewTranscriptStore(),
 	}, nil
+}
+
+func (mm *MediaManager) GetTranscriptSegments(streamer string) []aigateway.TranscriptSegment {
+	return mm.transcriptStore.GetSegments(streamer)
 }
 
 func (mm *MediaManager) HandleData(node *irohStreamplace.PublicKey, data []byte) {
