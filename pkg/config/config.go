@@ -65,7 +65,8 @@ type CLI struct {
 	HTTPAddr                   string
 	HTTPInternalAddr           string
 	HTTPSAddr                  string
-	RtmpsAddr                  string
+	RTMPSAddr                  string
+	RTMPAddr                   string
 	Secure                     bool
 	NoMist                     bool
 	MistAdminPort              int
@@ -119,6 +120,7 @@ type CLI struct {
 	AndroidCertFingerprint     string
 	Labelers                   []string
 	AtprotoDID                 string
+	DefaultRecommendedStreamers []string
 	LivepeerHelp               bool
 	PLCURL                     string
 	ContentFilters             *ContentFilters
