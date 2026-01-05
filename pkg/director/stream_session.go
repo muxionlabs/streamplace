@@ -43,6 +43,8 @@ type StreamSession struct {
 	op             *oatproxy.OATProxy
 	hls            *media.M3U8
 	lp             *livepeer.LivepeerSession
+	streamUrls     *livepeer.StreamUrls
+	streamUrlsLock sync.Mutex
 	repoDID        string
 	segmentChan    chan struct{}
 	lastStatus     time.Time
@@ -67,6 +69,7 @@ func (ss *StreamSession) Start(ctx context.Context, notif *media.NewSegmentNotif
 	ss.ctx = ctx
 	log.Log(ctx, "starting stream session")
 	defer cancel()
+	defer ss.sendStopRequest()
 	spseg, err := notif.Segment.ToStreamplaceSegment()
 	if err != nil {
 		return fmt.Errorf("could not convert segment to streamplace segment: %w", err)
@@ -542,15 +545,22 @@ func (ss *StreamSession) Transcode(ctx context.Context, spseg *streamplace.Segme
 				log.Error(ctx, "ai segment post failed", "error", err)
 				return nil
 			}
-			if urls != nil && urls.DataURL != "" {
-				log.Log(ctx, "✓ STARTING AI DATA OUTPUT CONSUMER", "data_url", urls.DataURL, "stream_id", urls.StreamID)
-				ss.Go(ctx, func() error {
-					return ss.ConsumeAIDataOutput(ctx, spseg.Creator, urls.DataURL)
-				})
-			} else if urls == nil {
-				log.Debug(ctx, "no streamUrls returned from PostAISegmentToGateway")
+			if urls != nil {
+				// Store the stream URLs for cleanup
+				ss.streamUrlsLock.Lock()
+				ss.streamUrls = urls
+				ss.streamUrlsLock.Unlock()
+				
+				if urls.DataURL != "" {
+					log.Log(ctx, "✓ STARTING AI DATA OUTPUT CONSUMER", "data_url", urls.DataURL, "stream_id", urls.StreamID, "stop_url", urls.StopURL)
+					ss.Go(ctx, func() error {
+						return ss.ConsumeAIDataOutput(ctx, spseg.Creator, urls.DataURL)
+					})
+				} else {
+					log.Log(ctx, "streamUrls returned but no data_url", "stream_id", urls.StreamID, "stop_url", urls.StopURL)
+				}
 			} else {
-				log.Log(ctx, "streamUrls returned but no data_url", "stream_id", urls.StreamID)
+				log.Debug(ctx, "no streamUrls returned from PostAISegmentToGateway")
 			}
 			return nil
 		})
@@ -791,4 +801,36 @@ func (ss *StreamSession) GetClientByDID(did string) (XRPCClient, error) {
 	}
 
 	return client, nil
+}
+
+func (ss *StreamSession) sendStopRequest() {
+	ss.streamUrlsLock.Lock()
+	urls := ss.streamUrls
+	ss.streamUrlsLock.Unlock()
+	
+	if urls == nil || urls.StopURL == "" {
+		return
+	}
+	
+	ctx := context.Background()
+	ctx = log.WithLogValues(ctx, "func", "sendStopRequest", "streamer", ss.repoDID)
+	log.Log(ctx, "sending POST stop request to gateway", "stop_url", urls.StopURL)
+	
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	
+	req, err := http.NewRequestWithContext(ctx, "POST", urls.StopURL, nil)
+	if err != nil {
+		log.Error(ctx, "failed to create stop request", "error", err, "stop_url", urls.StopURL)
+		return
+	}
+	
+	resp, err := aqhttp.DoTrusted(ctx, req)
+	if err != nil {
+		log.Error(ctx, "failed to send POST stop request", "error", err, "stop_url", urls.StopURL)
+		return
+	}
+	defer resp.Body.Close()
+	
+	log.Log(ctx, "successfully sent POST stop request to gateway", "stop_url", urls.StopURL, "status", resp.StatusCode)
 }
