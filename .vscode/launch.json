@@ -23,7 +23,7 @@
         "GOTOOLCHAIN": "auto",
         "LD_LIBRARY_PATH": "${workspaceFolder}/build-linux-amd64/lib",
         "ELECTRON_DISABLE_SANDBOX": "1",
-        "SP_DEV_FRONTEND_PROXY": "http://127.0.0.1:38081",
+        "SP_DEV_FRONTEND_PROXY_ORIGIN": "http://127.0.0.1:38080",
         "SP_DEV_PUBLIC_OAUTH": "true"
       },
       "console": "integratedTerminal"
