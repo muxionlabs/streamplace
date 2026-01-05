@@ -11,11 +11,10 @@ import {
 } from "streamplace";
 import { SystemMessages } from "../lib/system-messages";
 import { reduceChat } from "./chat";
-import { AIDataOutput, LivestreamState } from "./livestream-state";
+import { LivestreamState } from "./livestream-state";
 import { findProblems } from "./problems";
 
 const MAX_RECENT_SEGMENTS = 10;
-const MAX_AI_OUTPUTS = 50;
 
 export const handleWebSocketMessages = (
   state: LivestreamState,
@@ -101,25 +100,9 @@ export const handleWebSocketMessages = (
       };
       state = reduceChat(state, [], [], [hiddenMessageUri]);
     } else if ((message as any)?.$type === "place.stream.ai#dataOutput") {
-      // Handle AI data output from the gateway
+      // Log AI data output from the gateway for debugging.
       const aiMsg = message as any;
-      const aiOutput: AIDataOutput = {
-        timestamp: new Date().toISOString(),
-        data: aiMsg,
-        text: aiMsg.text,
-      };
-
-      const newAIOutputs = [...state.aiOutputs, aiOutput];
-      if (newAIOutputs.length > MAX_AI_OUTPUTS) {
-        newAIOutputs.shift(); // Remove oldest
-      }
-
       console.log("Received AI data output:", aiMsg);
-
-      state = {
-        ...state,
-        aiOutputs: newAIOutputs,
-      };
     }
   }
   return reduceChat(state, [], [], []);
